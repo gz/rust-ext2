@@ -1,0 +1,7 @@
+[package]
+name = "ext2"
+version = "0.1.0"
+authors = ["Gerd Zellweger <mail@gerdzellweger.com>"]
+
+[[test]]
+name = "readtest"
