@@ -1,17 +1,41 @@
 #![no_std]
+#![feature(const_fn)]
+#![feature(collections)]
 
 #![crate_name = "ext2"]
 #![crate_type = "lib"]
 
+extern crate collections;
 
 use core::mem::{size_of, transmute, zeroed};
 //use core::str;
 //use core::slice;
 //use core::default;
 use core::fmt;
+use collections::{String};
+
+use std::fs::File;
+use std::io::prelude::*;
+
 
 #[macro_use]
 extern crate std;
+
+pub trait Disk {
+    fn name(&self) -> String;
+    fn read(&mut self, block: u64, buffer: &mut [u8]) -> Result<(), usize>;
+    fn write(&mut self, block: u64, buffer: &[u8]) -> Result<(), usize>;
+}
+
+struct ExtFS<'a> {
+    disk: &'a (Disk + 'a),
+}
+
+impl<'a> ExtFS<'a> {
+    const fn new(disk: &'a Disk) -> ExtFS {
+        ExtFS { disk: disk }
+    }
+}
 
 #[repr(C)]
 pub struct SuperBlock {
