@@ -1,25 +1,34 @@
 #![no_std]
 #![feature(const_fn)]
 #![feature(collections)]
+#![feature(alloc)]
 
 #![crate_name = "ext2"]
 #![crate_type = "lib"]
 
 extern crate collections;
+extern crate alloc;
 
 use core::mem::{size_of, transmute, zeroed};
+use core::mem;
 //use core::str;
 //use core::slice;
 //use core::default;
 use core::fmt;
-use collections::{String};
+use core::slice;
+use collections::{String, Vec};
+use collections::boxed::{Box};
+use alloc::raw_vec::{RawVec};
 
 use std::fs::File;
 use std::io::prelude::*;
 
-
+// TODO: we would like to be libcore only:
 #[macro_use]
 extern crate std;
+//use std::collections::HashMap;
+//use std::boxed::Box;
+
 
 pub trait Disk {
     fn name(&self) -> String;
@@ -27,13 +36,163 @@ pub trait Disk {
     fn write(&mut self, block: u64, buffer: &[u8]) -> Result<(), usize>;
 }
 
-struct ExtFS<'a> {
-    disk: &'a (Disk + 'a),
+/*
+let len = self.len();
+let buf = RawVec::with_capacity(len);
+unsafe {
+    ptr::copy_nonoverlapping(self.as_ptr(), buf.ptr(), len);
+    mem::transmute(buf.into_box()) // bytes to str ~magic
+}*/
+
+#[derive(Debug)]
+pub enum BlockStorageError { BAD }
+
+pub enum BlockDataType {
+    Raw,
+    GroupDesc,
+    INodeTable,
+    BlockBitmap,
 }
 
-impl<'a> ExtFS<'a> {
-    const fn new(disk: &'a Disk) -> ExtFS {
-        ExtFS { disk: disk }
+pub struct Block {
+    block_number: u64,
+    dirty: bool,
+    buffer: RawVec<u8>,
+}
+
+impl core::fmt::Debug for Block {
+    fn fmt(&self, f: &mut core::fmt::Formatter) -> fmt::Result {
+        write!(f, "Block {{ nr: {} dirty: {} }}", self.block_number, self.dirty)
+    }
+}
+
+impl Block {
+
+    fn new(block: u64, buffer: RawVec<u8>) -> Block {
+        Block { dirty: false, block_number: block, buffer: buffer }
+    }
+
+    pub fn load_from_disk(disk: &mut Box<Disk>, block: u64, length: usize) -> Result<Block, BlockStorageError> {
+        let buffer = RawVec::with_capacity(length);
+        let slice: &mut [u8] = unsafe { slice::from_raw_parts_mut(buffer.ptr(), length) };
+
+        disk.read(block as u64, slice).unwrap();
+        Ok(Block::new(block, buffer))
+    }
+
+    pub unsafe fn as_group_descriptor<'a>(&'a self) -> &'a GroupDesc {
+         mem::transmute::<*const u8, &GroupDesc>(self.buffer.ptr())
+    }
+
+    pub unsafe fn as_inode_slice<'a>(&'a self, how_many: usize) -> &'a [INode] {
+        let ptr = mem::transmute::<*const u8, &INode>(self.buffer.ptr());
+        slice::from_raw_parts(ptr, how_many)
+    }
+
+    pub unsafe fn as_file_directory<'a>(&'a self, how_many: usize) -> &'a [INode] {
+        let ptr = mem::transmute::<*const u8, &INode>(self.buffer.ptr());
+        slice::from_raw_parts(ptr, how_many)
+    }
+
+    pub fn buffer<'a>(&'a self) -> &'a [u8] {
+        unsafe { slice::from_raw_parts(self.buffer.ptr(), self.buffer.cap()) }
+    }
+
+    pub fn buffer_mut<'a>(&'a mut self) -> &'a mut [u8] {
+        self.dirty = true;
+        unsafe { slice::from_raw_parts_mut(self.buffer.ptr(), self.buffer.cap()) }
+    }
+
+
+}
+
+pub struct BlockStorageService {
+    disk: Box<Disk>,
+    block_size: usize,
+}
+
+impl BlockStorageService {
+
+    pub fn new(disk: Box<Disk>, block_size: usize) -> BlockStorageService {
+        BlockStorageService { disk: disk, block_size: block_size }
+    }
+
+    pub fn get(&mut self, block: u64) -> Result<Block, BlockStorageError> {
+        Block::load_from_disk(&mut self.disk, block, self.block_size)
+    }
+
+    fn write(&mut self, b: Block) -> Result<(), BlockStorageError> {
+        Ok(())
+    }
+
+}
+
+pub struct ExtFS {
+    pub bs: BlockStorageService,
+    pub sb: SuperBlock,
+}
+
+impl ExtFS {
+
+    pub fn new(mut disk: Box<Disk>) -> ExtFS {
+        let sb: SuperBlock = SuperBlock::from_disk(&mut disk);
+        let bs: BlockStorageService = BlockStorageService::new(disk, sb.block_size() as usize);
+        ExtFS { bs: bs, sb: sb }
+    }
+
+    pub fn group_descriptor_table(&mut self) -> Result<Block, BlockStorageError> {
+        let block_number: u64 = self.sb.first_data_block as u64 + 1;
+        self.bs.get(block_number)
+    }
+
+    pub fn inode_table(&mut self, gd: &GroupDesc) -> Result<Block, BlockStorageError> {
+        self.bs.get(gd.inode_table as u64)
+    }
+}
+
+/*
+pub struct INodeIter<'a> {
+    disk: &'a mut Disk,
+    block: u32,
+    idx: u32,
+    inodes_per_group: u32,
+}
+
+impl<'a> Iterator for INodeIter<'a> {
+    type Item = INode;
+
+    #[inline]
+    fn next(&mut self) -> Option<INode> {
+        if self.idx >= self.inodes_per_group {
+            return None;
+        }
+
+        let mut buffer: [u8; 1024] = [0; 1024];
+        self.disk.read(self.block as u64, &mut buffer);
+
+        let buffer_windows = buffer.windows(128);
+        let raw_inode = buffer_windows.skip( (self.idx-1) as usize).next().unwrap();
+
+        let inode: INode = unsafe { mem::transmute_copy::<&[u8], INode>(&raw_inode) };
+        self.idx += 1;
+        Some(inode)
+    }
+}*/
+
+struct INodeTable {
+    disk: Box<Disk>,
+    buffer: Box<[u8]>
+}
+
+impl INodeTable {
+    pub fn from_disk(disk: Box<Disk>, block: u32, max_inodes: u32) {
+        let inodes: Vec<INode> = Vec::with_capacity(max_inodes as usize);
+        //inodes.as_mut_ptr();
+
+        //disk.read(block as u64, bf).unwrap();
+
+        //let mut buffer: &mut [u8; 32] = unsafe { mem::transmute::<&mut GroupDesc, &mut [u8; 32]>(&mut gd) };
+        //gd
     }
 }
 
@@ -138,6 +297,32 @@ pub struct SuperBlock {
      pub reserved: [u32; 190],	/* Padding to the end of the block */
 }
 
+impl SuperBlock {
+
+    fn from_disk<'a>(disk: &mut Box<Disk>) -> SuperBlock {
+        let mut sb = SuperBlock::default();
+        let mut buffer: &mut [u8; 1024] = unsafe { mem::transmute::<&mut SuperBlock, &mut [u8; 1024]>(&mut sb) };
+        disk.read(1, buffer).unwrap();
+
+        assert!(sb.magic == 0xEF53);
+        sb
+    }
+
+    fn block_size(&self) -> u64 {
+        1024 << self.log_block_size
+    }
+
+    fn frag_size(&self) -> u64 {
+        if self.log_frag_size > 0 {
+            1024 << self.log_frag_size
+        }
+        else {
+            1024 >> -(self.log_frag_size as i32)
+        }
+
+    }
+}
+
 impl core::default::Default for SuperBlock {
     fn default() -> SuperBlock {
         unsafe { zeroed() }
@@ -153,8 +338,8 @@ impl core::fmt::Debug for SuperBlock {
         try!(write!(f, "\tFree blocks count: {}\n", self.free_blocks_count));
         try!(write!(f, "\tFree inodes count: {}\n", self.free_inodes_count));
         try!(write!(f, "\tFirst Data Block: {}\n", self.first_data_block));
-        try!(write!(f, "\tBlock size: {}\n", self.log_block_size));
-        try!(write!(f, "\tFragment size: {}\n", self.log_frag_size));
+        try!(write!(f, "\tBlock size: {}\n", self.block_size()));
+        try!(write!(f, "\tFragment size: {}\n", self.frag_size()));
         try!(write!(f, "\t# Blocks per group: {}\n", self.blocks_per_group));
         try!(write!(f, "\t# Fragments per group: {}\n", self.frags_per_group));
         try!(write!(f, "\t# Inodes per group: {}\n", self.inodes_per_group));
@@ -177,7 +362,7 @@ impl core::fmt::Debug for SuperBlock {
 }
 
 #[repr(C)]
-struct GroupDesc {
+pub struct GroupDesc {
      /// Blocks bitmap block
      block_bitmap: u32,
      /// Inodes bitmap block
@@ -192,6 +377,18 @@ struct GroupDesc {
      used_dirs_count: u16,
      pad: u16,
      reserved: [u32; 3]
+}
+
+impl GroupDesc {
+
+    fn from_fs(fs: &mut ExtFS, block: u32) -> GroupDesc {
+        let mut gd = GroupDesc::default();
+        let mut buffer: &mut [u8; 32] = unsafe { mem::transmute::<&mut GroupDesc, &mut [u8; 32]>(&mut gd) };
+
+        let b: Block = fs.bs.get(block as u64).unwrap();
+        gd
+    }
+
 }
 
 impl core::default::Default for GroupDesc {
@@ -213,54 +410,158 @@ impl core::fmt::Debug for GroupDesc {
 }
 
 
+// file format
+/// socket
+pub const EXT2_S_IFSOCK: u16 = 0xC000;
+/// symbolic link
+pub const EXT2_S_IFLNK: u16 = 0xA000;
+/// regular file
+pub const EXT2_S_IFREG: u16 = 0x8000;
+/// block device
+pub const EXT2_S_IFBLK: u16 = 0x6000;
+/// directory
+pub const EXT2_S_IFDIR: u16 = 0x4000;
+/// character device
+pub const EXT2_S_IFCHR: u16 = 0x2000;
+/// fifo
+pub const EXT2_S_IFIFO: u16 = 0x1000;
+
+
+// process execution user/group override
+/// Set process User ID
+pub const EXT2_S_ISUID: u16 = 0x0800;
+/// Set process Group ID
+pub const EXT2_S_ISGID: u16 = 0x0400;
+/// sticky bit
+pub const EXT2_S_ISVTX: u16 = 0x0200;
+
+
+// access rights
+/// user read
+pub const EXT2_S_IRUSR: u16 = 0x0100;
+/// user write
+pub const EXT2_S_IWUSR: u16 = 0x0080;
+/// user execute
+pub const EXT2_S_IXUSR: u16 = 0x0040;
+/// group read
+pub const EXT2_S_IRGRP: u16 = 0x0020;
+/// group write
+pub const EXT2_S_IWGRP: u16 = 0x0010;
+/// group execute
+pub const EXT2_S_IXGRP: u16 = 0x0008;
+/// others read
+pub const EXT2_S_IROTH: u16 = 0x0004;
+/// others write
+pub const EXT2_S_IWOTH: u16 = 0x0002;
+/// others execute
+pub const EXT2_S_IXOTH: u16 = 0x0001;
+
+
+// Defined Reserved Inodes
+/// bad blocks inode
+pub const EXT2_BAD_INO: usize = 1;
+/// root directory inode
+pub const EXT2_ROOT_INO: usize = 2;
+/// ACL index inode (deprecated?)
+pub const EXT2_ACL_IDX_INO: usize = 3;
+/// ACL data inode (deprecated?)
+pub const EXT2_ACL_DATA_INO: usize = 4;
+/// boot loader inode
+pub const EXT2_BOOT_LOADER_INO: usize = 5;
+/// undelete directory inode
+pub const EXT2_UNDEL_DIR_INO: usize = 6;
+
+
 const EXT2_NDIR_BLOCKS: usize = 12;
 const EXT2_IND_BLOCK: usize = EXT2_NDIR_BLOCKS;
 const EXT2_DIND_BLOCK: usize = (EXT2_IND_BLOCK + 1);
 const EXT2_TIND_BLOCK: usize = (EXT2_DIND_BLOCK + 1);
 const EXT2_N_BLOCKS: usize = (EXT2_TIND_BLOCK + 1);
 
+#[repr(C)]
 pub struct INode {
      /// File mode
-     mode: u16,
+     pub mode: u16,
      /// Low 16 bits of Owner Uid
-     uid: u16,
+     pub uid: u16,
      /// Size in bytes
-     size: u32,
+     pub size: u32,
      /// Access time
-     atime: u32,
+     pub atime: u32,
      /// Creation time
-     ctime: u32,
+     pub ctime: u32,
      /// Modification time
-     mtime: u32,
+     pub mtime: u32,
      /// Deletion Time
-     dtime: u32,
+     pub dtime: u32,
      /// Low 16 bits of Group Id
-     gid: u16,
+     pub gid: u16,
      /// Links count
-     links_count: u16,
+     pub links_count: u16,
      /// Blocks count
-     blocks: u32,
+     pub blocks: u32,
      /// File flags
-     flags: u32,
-     l_reserved1: u32,
+     pub flags: u32,
+     reserved1: u32,
      /// Pointers to blocks
-     block: [u32; EXT2_N_BLOCKS],
+     pub block: [u32; EXT2_N_BLOCKS],
      /// File version (for NFS)
-     generation: u32,
+     pub generation: u32,
      /// File ACL
-     file_acl: u32,
+     pub file_acl: u32,
      /// Directory ACL
-     dir_acl: u32,
+     pub dir_acl: u32,
      /// Fragment address
-     faddr: u32,
+     pub faddr: u32,
      /// Fragment number
-     l_frag: u8,
+     pub l_frag: u8,
      /// Fragment size
-     l_fsize: u8,
+     pub l_fsize: u8,
      pad1: u16,
      l_uid_high: u16,
      l_gid_high: u16,
      l_reserved2: u32,
+}
+
+impl INode {
+
+    pub fn size(&self) -> u64 {
+        ((self.dir_acl as u64) << 32) | self.size as u64
+    }
+
+    pub fn file_format(&self) -> &'static str {
+        let format = self.mode & 0xF000;
+
+        if format == EXT2_S_IFSOCK {
+            return "socket";
+        }
+
+        if format == EXT2_S_IFLNK {
+            return "symbolic link";
+        }
+
+        if format == EXT2_S_IFREG {
+            return "regular file";
+        }
+
+        if format == EXT2_S_IFBLK {
+            return "block device";
+        }
+
+        if format == EXT2_S_IFDIR {
+            return "directory";
+        }
+
+        if format == EXT2_S_IFCHR {
+            return "character device";
+        }
+
+        if format == EXT2_S_IFIFO {
+            return "fifo";
+        }
+
+        "unknown"
+    }
 }
 
 impl core::default::Default for INode {
@@ -272,7 +573,7 @@ impl core::default::Default for INode {
 impl core::fmt::Debug for INode {
     fn fmt(&self, f: &mut core::fmt::Formatter) -> fmt::Result {
         try!(write!(f, "INode\n"));
-        try!(write!(f, "\tFile mode: {}\n", self.mode));
+        try!(write!(f, "\tFile mode: {} ({})\n", self.mode, self.file_format()));
         try!(write!(f, "\tLow 16 bits of Owner Uid: {}\n", self.uid));
         try!(write!(f, "\tSize in bytes: {}\n", self.size));
         try!(write!(f, "\tAccess time: {}\n", self.atime));
@@ -283,7 +584,8 @@ impl core::fmt::Debug for INode {
         try!(write!(f, "\tLinks count: {}\n", self.links_count));
         try!(write!(f, "\tBlocks count: {}\n", self.blocks));
         try!(write!(f, "\tFile flags: {}\n", self.flags));
-        //try!(write!(f, "\tPointers to blocks: {}\n", self.block));
+        try!(write!(f, "\tPointers to blocks: {} {} {} {} {} {}\n",
+                       self.block[0], self.block[1], self.block[2], self.block[3], self.block[4], self.block[5]));
         try!(write!(f, "\tFile version (for NFS): {}\n", self.generation));
         try!(write!(f, "\tFile ACL: {}\n", self.file_acl));
         try!(write!(f, "\tDirectory ACL: {}\n", self.dir_acl));
@@ -292,6 +594,8 @@ impl core::fmt::Debug for INode {
         write!(f, "\tFragment size: {}\n", self.l_fsize)
     }
 }
+
+// DirEntryIter
 
 pub struct DirEntry {
     /// Inode number
