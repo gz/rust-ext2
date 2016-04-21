@@ -89,9 +89,8 @@ impl Block {
         slice::from_raw_parts(ptr, how_many)
     }
 
-    pub unsafe fn as_file_directory<'a>(&'a self, how_many: usize) -> &'a [INode] {
-        let ptr = mem::transmute::<*const u8, &INode>(self.buffer.ptr());
-        slice::from_raw_parts(ptr, how_many)
+    pub unsafe fn directory_iter<'a>(&'a self, how_many: usize) -> DirIter<'a> {
+        DirIter { block: self.buffer(), offset: 0 }
     }
 
     pub fn buffer<'a>(&'a self) -> &'a [u8] {
@@ -102,8 +101,33 @@ impl Block {
         self.dirty = true;
         unsafe { slice::from_raw_parts_mut(self.buffer.ptr(), self.buffer.cap()) }
     }
+}
 
+pub struct DirIter<'a> {
+    block: &'a [u8],
+    offset: usize
+}
 
+//impl<'a, T> Iterator<&'a T> for Items<'a, T>.
+
+impl<'a> Iterator for DirIter<'a> {
+    type Item = &'a DirEntry;
+
+    #[inline]
+    fn next(&mut self) -> Option<&'a DirEntry> {
+
+        if self.offset < self.block.len() {
+            let name_len = unsafe { mem::transmute::<*const u8, *const u16>(&self.block[self.offset+6]) };
+            let slice: &[u8] = unsafe { slice::from_raw_parts(&self.block[self.offset], *name_len as usize) };
+            let dir_entry = unsafe { mem::transmute::<&'a [u8], &'a DirEntry>(slice) };
+
+            //println!("{:?}", dir_entry);
+            self.offset += dir_entry.rec_len as usize;
+            return Some(dir_entry);
+        }
+
+        return None;
+    }
 }
 
 pub struct BlockStorageService {
@@ -147,52 +171,6 @@ impl ExtFS {
 
     pub fn inode_table(&mut self, gd: &GroupDesc) -> Result<Block, BlockStorageError> {
         self.bs.get(gd.inode_table as u64)
-    }
-}
-
-/*
-pub struct INodeIter<'a> {
-    disk: &'a mut Disk,
-    block: u32,
-    idx: u32,
-    inodes_per_group: u32,
-}
-
-impl<'a> Iterator for INodeIter<'a> {
-    type Item = INode;
-
-    #[inline]
-    fn next(&mut self) -> Option<INode> {
-        if self.idx >= self.inodes_per_group {
-            return None;
-        }
-
-        let mut buffer: [u8; 1024] = [0; 1024];
-        self.disk.read(self.block as u64, &mut buffer);
-
-        let buffer_windows = buffer.windows(128);
-        let raw_inode = buffer_windows.skip( (self.idx-1) as usize).next().unwrap();
-
-        let inode: INode = unsafe { mem::transmute_copy::<&[u8], INode>(&raw_inode) };
-        self.idx += 1;
-        Some(inode)
-    }
-}*/
-
-struct INodeTable {
-    disk: Box<Disk>,
-    buffer: Box<[u8]>
-}
-
-impl INodeTable {
-    pub fn from_disk(disk: Box<Disk>, block: u32, max_inodes: u32) {
-        let inodes: Vec<INode> = Vec::with_capacity(max_inodes as usize);
-        //inodes.as_mut_ptr();
-
-        //disk.read(block as u64, bf).unwrap();
-
-        //let mut buffer: &mut [u8; 32] = unsafe { mem::transmute::<&mut GroupDesc, &mut [u8; 32]>(&mut gd) };
-        //gd
     }
 }
 
@@ -608,12 +586,11 @@ pub struct DirEntry {
     name: [u8]
 }
 
+impl DirEntry {
+    /*pub fn name<'a>(&'a self) -> &'a str {
 
-/*impl core::default::Default for DirEntry {
-    fn default() -> DirEntry {
-        unsafe { zeroed() }
-    }
-}*/
+    }*/
+}
 
 impl core::fmt::Debug for DirEntry {
     fn fmt(&self, f: &mut core::fmt::Formatter) -> fmt::Result {
