@@ -19,6 +19,7 @@ use core::slice;
 use collections::{String, Vec};
 use collections::boxed::{Box};
 use alloc::raw_vec::{RawVec};
+use core::str;
 
 use std::fs::File;
 use std::io::prelude::*;
@@ -587,9 +588,15 @@ pub struct DirEntry {
 }
 
 impl DirEntry {
-    /*pub fn name<'a>(&'a self) -> &'a str {
 
-    }*/
+    pub fn name<'a>(&'a self) -> &'a str {
+        //assert!(self.name_len < EXT2_NAME_LEN);
+        let ptr = self.name.as_ptr();
+        unsafe {
+            let slice = slice::from_raw_parts(ptr, self.name_len as usize);
+            str::from_utf8_unchecked(slice)
+        }
+    }
 }
 
 impl core::fmt::Debug for DirEntry {
@@ -597,7 +604,7 @@ impl core::fmt::Debug for DirEntry {
         try!(write!(f, "DirEntry\n"));
         try!(write!(f, "\tInode number: {}\n", self.inode));
         try!(write!(f, "\tDirectory entry length: {}\n", self.rec_len));
-        write!(f, "\tName length: {}\n", self.name_len)
-        //try!(write!(f, "\tFile name, up to EXT2_NAME_LEN: {}\n", self.name));
+        try!(write!(f, "\tName length: {}\n", self.name_len));
+        write!(f, "\tFile name, up to EXT2_NAME_LEN: {}\n", self.name())
     }
 }
